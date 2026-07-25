@@ -4,7 +4,17 @@
 
 GameBenchy est un environnement d'évaluation reproductible pour agents LLM, construit autour d'un jeu de défense par vagues avec maze-building. Le round de préparation est un problème de planification pur (état complet visible, optimisation spatiale + économique), ce qui isole le raisonnement stratégique. La génération procédurale et les mécaniques originales éliminent la contamination par les corpus d'entraînement (contrairement aux benchmarks basés sur NetHack).
 
-> **Statut : v0 — cadrage.** Ce document fige les décisions de design. Rien n'est codé.
+> **Statut : v0.1 — moteur jouable.** Moteur déterministe, simulation de vagues et TUI implémentés. Le reste de ce document fige les décisions de design ; §9 note les écarts entre le design et le code.
+
+## Démarrer
+
+```sh
+cargo run -p tui -- 42          # jouer une partie (seed 42)
+cargo test                      # moteur + rendu
+cargo run -q -p engine --example balance   # harnais d'équilibrage (agent scripté)
+```
+
+Au TUI : `hjkl`/flèches déplacent le curseur, `1`–`5` construisent, `s` vend, `m` déplace, `Entrée` lance la vague, `r` rejoue la même seed, `q` quitte.
 
 ---
 
@@ -214,9 +224,11 @@ Le runner compte les erreurs **par catégorie** → profil d'incompréhension pa
 
 Budget : ~7 h/semaine. Deadline : **premier run comparatif publiable avant octobre 2026**.
 
-### v0.1 — Moteur jouable (semaines 1–4)
+### v0.1 — Moteur jouable (semaines 1–4) — **fait**
 Structs, génération de vagues seedée, pathfinding + no-block + tie-breaking, boucle prépa/résolution, simulation déterministe, vies, score. TUI pour jouer soi-même.
 **Jalon : perdre une partie au TUI et la trouver intéressante.** L'équilibrage se fait ici, en jouant — pas en théorisant. Ne pas avancer tant que le jeu est trivial.
+
+État : `cargo run -p tui -- 42` joue une partie complète jusqu'à la mort. Premier passage d'équilibrage fait au harnais scripté (`--example balance`) : agent greedy mort vague ~24 en moyenne (5 seeds), première fuite vague ~5 (arrivée des blindés), aucune tourelle dominante (meilleure stratégie mono-tourelle : vague 10). **Reste à valider à la main** : jouer quelques parties au TUI et confirmer que c'est intéressant, pas seulement non trivial.
 
 ### v0.2 — API + persistance (semaines 5–6)
 Serveur axum, 3 endpoints, validation + erreurs catégorisées, SQLite (seed + log d'actions).
@@ -257,3 +269,25 @@ Interface web humaine (comparaison humain/LLM), mode stream (agent verbalisant +
 | Éval | 3 seeds × 3 runs, moyenne ; baselines random + greedy |
 | Limite | 20 actions/round, ~100 vagues max |
 | Budget | LLM locaux d'abord, ~100 € si concluant |
+
+---
+
+## 9. Ce que v0.1 a tranché (le code fait foi : `engine/src/lib.rs`)
+
+Décisions prises en implémentant, non couvertes ou laissées ouvertes par le cadrage :
+
+| Point | Choix v0.1 | Pourquoi |
+|---|---|---|
+| Gradient de difficulté | PV ennemis **+8 %/vague, composé** | Le revenu (donc la DPS achetable) croît linéairement : la partie finit toujours, sans palier ni saturation |
+| **Blindage** (nouvelle mécanique) | Le blindé retranche 6 dégâts de chaque coup non spécialisé | Sans ça le sniper généraliste répondait à tout : plus de counter, plus d'arbitrage |
+| Arrivée des types | Blindés vague 5, volants vague 8 | Laisse le temps d'apprendre une menace à la fois |
+| Économie | 180 or de départ, +30/vague, éco +8 | Permet de réagir à un counter à 70 or sans rendre le spam de tourelles gratuit |
+| Vies | 20 ; infanterie 1, blindé 3, volant 1 | Une vague ratée coûte cher sans finir la partie |
+| Tie-breaking du chemin | BFS, ordre d'exploration **Droite, Bas, Haut, Gauche** | Déterministe et documenté (README §2) |
+| Ordre d'un tick | spawn → tir → morts → déplacement | Figé : c'est ce qui rend la simulation rejouable |
+| Ciblage | L'ennemi le plus avancé à portée, id croissant en cas d'égalité | Déterministe, et lisible pour un agent |
+| Ordre d'apparition | Fisher-Yates seedé (composition connue, ordre non) | Conforme au contrat §2 |
+| RNG | xorshift64* écrit dans le dépôt | La reproductibilité ne peut pas dépendre d'une version de crate |
+| Résolution au TUI | Rapport immédiat, pas d'animation | v0.1 sert à équilibrer, pas à regarder ; animation = v0.2+ si utile |
+
+Tout ça reste à ré-équilibrer en jouant : `engine/examples/balance.rs` mesure, le TUI tranche.
