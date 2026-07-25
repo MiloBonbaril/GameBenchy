@@ -650,6 +650,23 @@ pub fn wave_composition(seed: u64, wave: u32) -> Composition {
     [infantry as u32, armor as u32, flyer as u32]
 }
 
+/// `incoming_intel` : annonce textuelle de la vague `wave` (README §2).
+/// Mode `minimal` — le mode `detailed` (lore noyé) arrive en v0.4.
+pub fn incoming_intel(seed: u64, wave: u32) -> String {
+    let c = wave_composition(seed, wave);
+    let mut bits = Vec::new();
+    if c[1] > 0 {
+        bits.push("des moteurs lourds grondent au loin");
+    }
+    if c[2] > 0 {
+        bits.push("le ciel bourdonne");
+    }
+    if bits.is_empty() {
+        bits.push("des colonnes d'infanterie se rassemblent");
+    }
+    format!("N+2 : {}.", bits.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

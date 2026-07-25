@@ -4,13 +4,14 @@
 
 GameBenchy est un environnement d'évaluation reproductible pour agents LLM, construit autour d'un jeu de défense par vagues avec maze-building. Le round de préparation est un problème de planification pur (état complet visible, optimisation spatiale + économique), ce qui isole le raisonnement stratégique. La génération procédurale et les mécaniques originales éliminent la contamination par les corpus d'entraînement (contrairement aux benchmarks basés sur NetHack).
 
-> **Statut : v0.1 — moteur jouable.** Moteur déterministe, simulation de vagues et TUI implémentés. Le reste de ce document fige les décisions de design ; §9 note les écarts entre le design et le code.
+> **Statut : v0.2 — API + persistance.** Moteur déterministe, simulation de vagues, TUI et serveur HTTP implémentés. Le reste de ce document fige les décisions de design ; §9 et §10 notent les écarts entre le design et le code.
 
 ## Démarrer
 
 ```sh
 cargo run -p tui -- 42          # jouer une partie (seed 42)
-cargo test                      # moteur + rendu
+cargo run -p server             # API sur 127.0.0.1:3000, base gamebenchy.db
+cargo test                      # moteur + API + rendu
 cargo run -q -p engine --example balance   # harnais d'équilibrage (agent scripté)
 ```
 
@@ -117,59 +118,72 @@ gamebenchy/  (workspace Rust)
 
 ## 4. Contrat agent / moteur
 
+**Schéma figé en v0.2** — implémenté par `server/`, testé par `server/src/main.rs`. Toute évolution ultérieure est une rupture de contrat explicite.
+
+Base : `http://127.0.0.1:3000`. Trois endpoints. La partie est désignée par `?game_id=gN` en query string (`POST /game` le retourne).
+
 ### `POST /game`
 
 ```json
 {"seed": 42, "mode": "minimal"}
 ```
-→ `game_id` + état initial.
+→ `{"ok": true, "state": {...}}`, avec `state.game_id`. `mode` est optionnel (défaut `minimal`).
 
-### `GET /state`
+### `GET /state?game_id=g1`
 
 ```json
 {
-  "game_id": "uuid",
-  "seed": 42,
-  "wave": 7,
-  "phase": "preparation",
-  "lives": 12,
-  "gold": 85,
-  "income_per_wave": 25,
-  "board": {
-    "width": 10, "height": 10,
-    "entry": {"x": 0, "y": 4},
-    "exit": {"x": 9, "y": 5},
-    "buildings": [
-      {"id": "b1", "type": "sniper", "x": 3, "y": 4, "hp": 100}
-    ]
-  },
-  "current_path": [{"x": 0, "y": 4}, {"x": 1, "y": 4}],
-  "next_wave": {"composition": {"infantry": 8, "armor": 2, "flyer": 0}},
-  "incoming_intel": "Des moteurs lourds grondent au loin...",
-  "moves_remaining": 1,
-  "shop": [
-    {"type": "sniper", "cost": 50},
-    {"type": "flamethrower", "cost": 40},
-    {"type": "anti_armor", "cost": 70},
-    {"type": "mortar", "cost": 90},
-    {"type": "eco", "cost": 60}
-  ],
-  "last_wave_report": {
-    "leaked": [{"type": "infantry", "count": 1}],
-    "lives_lost": 1,
-    "kills": {"infantry": 7, "armor": 2},
-    "damage_by_building": {"b1": 340}
+  "ok": true,
+  "state": {
+    "game_id": "g1",
+    "seed": 42,
+    "mode": "minimal",
+    "wave": 7,
+    "phase": "preparation",
+    "lives": 12,
+    "gold": 85,
+    "income_per_wave": 38,
+    "board": {
+      "width": 10, "height": 10,
+      "entry": {"x": 0, "y": 4},
+      "exit": {"x": 9, "y": 5},
+      "buildings": [
+        {"id": "b1", "type": "sniper", "x": 3, "y": 2, "damage_dealt": 540}
+      ]
+    },
+    "current_path": [{"x": 0, "y": 4}, {"x": 1, "y": 4}],
+    "next_wave": {"composition": {"infantry": 8, "armor": 2, "flyer": 0}},
+    "incoming_intel": "N+2 : des moteurs lourds grondent au loin.",
+    "moves_remaining": 1,
+    "actions_remaining": 20,
+    "shop": [
+      {"type": "sniper", "cost": 50},
+      {"type": "flamethrower", "cost": 40},
+      {"type": "anti_armor", "cost": 70},
+      {"type": "mortar", "cost": 90},
+      {"type": "eco", "cost": 60}
+    ],
+    "last_wave_report": {
+      "wave": 6,
+      "kills": {"infantry": 7, "armor": 2, "flyer": 0},
+      "leaked": {"infantry": 1, "armor": 0, "flyer": 0},
+      "lives_lost": 1,
+      "damage_by_building": {"b1": 340}
+    }
   }
 }
 ```
 
+`phase` ∈ `preparation` | `game_over`. `last_wave_report` est `null` avant la première vague. L'ordre des clés JSON n'est pas significatif.
+
 Notes de design :
 
 - **`current_path` est fourni** en v1 (isole la stratégie de la géométrie). Le masquer plus tard = une variante d'éval "simulation spatiale mentale" gratuite.
-- **`incoming_intel`** est le canal unique du flavor text (modes minimal/detailed).
+- **`incoming_intel`** est le canal unique du flavor text (modes minimal/detailed) et annonce la vague **N+2**.
 - **`last_wave_report`** rend l'adaptation mesurable.
+- **`actions_remaining`** expose la limite dure : sans elle l'agent ne peut pas savoir qu'il va se faire clôturer son tour.
 
-### `POST /action`
+### `POST /action?game_id=g1`
 
 ```json
 {"action": "build", "building_type": "sniper", "x": 3, "y": 5}
@@ -191,9 +205,18 @@ Plusieurs actions par round de préparation, clôturées par `end_turn`.
 {"ok": false, "error_code": "PATH_BLOCKED", "message": "Ce placement rendrait la sortie inaccessible."}
 ```
 
-Codes : `PATH_BLOCKED` · `INSUFFICIENT_GOLD` · `CELL_OCCUPIED` · `NO_MOVES_LEFT` · `INVALID_CELL` · `WRONG_PHASE` · `UNKNOWN_BUILDING`.
+Codes de règle (HTTP 400) : `PATH_BLOCKED` · `INSUFFICIENT_GOLD` · `CELL_OCCUPIED` · `NO_MOVES_LEFT` · `INVALID_CELL` · `WRONG_PHASE` · `UNKNOWN_BUILDING`.
+Codes de protocole : `UNKNOWN_ACTION` (400, JSON non conforme au contrat) · `UNKNOWN_GAME` (404).
 
 Le runner compte les erreurs **par catégorie** → profil d'incompréhension par modèle (spatial vs économique vs protocole).
+
+### Persistance & rejeu
+
+SQLite, deux tables : `games(id, seed, mode)` et `actions(game_id, n, payload)`. **L'état n'est jamais stocké** : il est rejoué depuis le seed + le log à chaque requête, le moteur étant déterministe. Conséquences :
+
+- toute partie est auditable action par action (`SELECT payload FROM actions WHERE game_id = 1 ORDER BY n`) ;
+- le serveur peut redémarrer en cours de partie sans rien perdre ;
+- les actions **en erreur sont journalisées aussi** — elles consomment un crédit d'action et alimentent les métriques, les omettre ferait diverger le rejeu.
 
 ---
 
@@ -230,9 +253,11 @@ Structs, génération de vagues seedée, pathfinding + no-block + tie-breaking, 
 
 État : `cargo run -p tui -- 42` joue une partie complète jusqu'à la mort. Premier passage d'équilibrage fait au harnais scripté (`--example balance`) : agent greedy mort vague ~24 en moyenne (5 seeds), première fuite vague ~5 (arrivée des blindés), aucune tourelle dominante (meilleure stratégie mono-tourelle : vague 10). **Reste à valider à la main** : jouer quelques parties au TUI et confirmer que c'est intéressant, pas seulement non trivial.
 
-### v0.2 — API + persistance (semaines 5–6)
+### v0.2 — API + persistance (semaines 5–6) — **fait**
 Serveur axum, 3 endpoints, validation + erreurs catégorisées, SQLite (seed + log d'actions).
 **Jalon : schéma JSON figé et documenté** (contrat stable avant le runner).
+
+État : `cargo run -p server` sert les trois endpoints ; le schéma ci-dessus (§4) est le contrat figé, testé bout en bout (`cargo test -p server`). La persistance ne stocke que le seed et le log d'actions : l'état est rejoué à chaque requête, donc une partie survit au redémarrage du serveur et reste auditable action par action. Écarts de contrat par rapport au cadrage initial : §10.
 
 ### v0.3 — Runner + baselines (semaines 7–8)
 Interface agent, adaptateur Ollama, agents random + greedy, campagne 3×3, sortie CSV/markdown.
@@ -291,3 +316,20 @@ Décisions prises en implémentant, non couvertes ou laissées ouvertes par le c
 | Résolution au TUI | Rapport immédiat, pas d'animation | v0.1 sert à équilibrer, pas à regarder ; animation = v0.2+ si utile |
 
 Tout ça reste à ré-équilibrer en jouant : `engine/examples/balance.rs` mesure, le TUI tranche.
+
+---
+
+## 10. Ce que v0.2 a tranché (le code fait foi : `server/src/main.rs`)
+
+Le schéma §4 est figé ; voici où il s'écarte de l'esquisse initiale et pourquoi.
+
+| Point | Choix v0.2 | Pourquoi |
+|---|---|---|
+| Désignation de la partie | `?game_id=gN` en query string, id court séquentiel | L'esquisse ne disait pas où passait le `game_id` ; un id opaque suffit, un UUID coûterait une dépendance pour rien |
+| `hp` des bâtiments | Remplacé par `damage_dealt` | Les bâtiments ne sont pas attaquables en v1 : le champ aurait été une constante ; le cumul de dégâts, lui, sert à l'agent |
+| `kills` / `leaked` | Les deux sont des objets `{infantry, armor, flyer}` | L'esquisse mélangeait objet et liste ; un seul type de composition partout |
+| `actions_remaining` | Ajouté à l'état | La limite dure est une règle du jeu : la cacher pénaliserait l'agent sur du protocole, pas sur de la stratégie |
+| `mode` | Accepté, persisté, renvoyé — texte `minimal` dans les deux cas | Le contrat est figé maintenant ; l'écriture du lore `detailed` est le travail de v0.4 |
+| Erreurs de protocole | `UNKNOWN_ACTION` (400) et `UNKNOWN_GAME` (404) en plus des 7 codes de règle | Un JSON malformé n'est pas une erreur de jeu : le runner doit pouvoir séparer les deux profils |
+| Stockage de l'état | Aucun : seed + log rejoués à chaque requête | Une seule source de vérité, aucun cache à invalider, rejeu et audit gratuits ; un cache mémoire viendra si la latence se voit |
+| Journalisation des erreurs | Les actions refusées sont écrites au log comme les autres | Elles consomment un crédit d'action et incrémentent les métriques : les omettre ferait diverger le rejeu |

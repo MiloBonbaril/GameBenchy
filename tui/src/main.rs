@@ -197,7 +197,7 @@ fn panel(f: &mut Frame, area: Rect, app: &App) {
         Line::from("VAGUE ENTRANTE".bold()),
         Line::from(composition_line(comp)),
         Line::from(Span::styled(
-            intel(g.seed, g.wave + 1),
+            incoming_intel(g.seed, g.wave + 1),
             Style::new().italic(),
         )),
         Line::from(""),
@@ -264,25 +264,6 @@ fn describe(kind: BuildingType) -> &'static str {
         BuildingType::Mortar => "AoE longue portée, cadence lente",
         BuildingType::Eco => "+8 or/vague, ne défend pas",
     }
-}
-
-/// `incoming_intel` v0.1 : lore sec (mode `minimal` du contrat agent).
-fn intel(seed: u64, wave: u32) -> String {
-    let c = wave_composition(seed, wave);
-    if wave > 100 {
-        return String::new();
-    }
-    let mut bits = Vec::new();
-    if c[1] > 0 {
-        bits.push("des moteurs lourds grondent au loin");
-    }
-    if c[2] > 0 {
-        bits.push("le ciel bourdonne");
-    }
-    if bits.is_empty() {
-        bits.push("des colonnes d'infanterie se rassemblent");
-    }
-    format!("N+2 : {}.", bits.join(", "))
 }
 
 #[cfg(test)]
