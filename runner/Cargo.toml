@@ -1,0 +1,9 @@
+[package]
+name = "runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+engine = { version = "0.1.0", path = "../engine" }
+serde_json = "1.0.151"
+server = { version = "0.1.0", path = "../server" }

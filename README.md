@@ -4,15 +4,22 @@
 
 GameBenchy est un environnement d'évaluation reproductible pour agents LLM, construit autour d'un jeu de défense par vagues avec maze-building. Le round de préparation est un problème de planification pur (état complet visible, optimisation spatiale + économique), ce qui isole le raisonnement stratégique. La génération procédurale et les mécaniques originales éliminent la contamination par les corpus d'entraînement (contrairement aux benchmarks basés sur NetHack).
 
-> **Statut : v0.2 — API + persistance.** Moteur déterministe, simulation de vagues, TUI et serveur HTTP implémentés. Le reste de ce document fige les décisions de design ; §9 et §10 notent les écarts entre le design et le code.
+> **Statut : v0.3 — runner + baselines.** Moteur déterministe, TUI, serveur HTTP et runner de benchmark implémentés ; premier tableau de résultats en §11. Le reste de ce document fige les décisions de design ; §9, §10 et §11 notent les écarts entre le design et le code.
 
 ## Démarrer
 
 ```sh
 cargo run -p tui -- 42          # jouer une partie (seed 42)
 cargo run -p server             # API sur 127.0.0.1:3000, base gamebenchy.db
-cargo test                      # moteur + API + rendu
-cargo run -q -p engine --example balance   # harnais d'équilibrage (agent scripté)
+cargo test                      # moteur + API + agents + rendu
+cargo run -p runner --release   # campagne baselines → results/campaign.{csv,md}
+cargo run -p runner --release -- balance   # harnais d'équilibrage (table mono-tourelle)
+```
+
+Campagne avec un LLM local (serveur OpenAI-compatible : llama.cpp, Ollama, vLLM) :
+
+```sh
+cargo run -p runner --release -- --agent greedy --agent llm:gemma@127.0.0.1:8080 --max-waves 25
 ```
 
 Au TUI : `hjkl`/flèches déplacent le curseur, `1`–`5` construisent, `s` vend, `m` déplace, `Entrée` lance la vague, `r` rejoue la même seed, `q` quitte.
@@ -111,7 +118,7 @@ gamebenchy/  (workspace Rust)
 
 - **Moteur** : Rust, déterministe, seedé. Aucune dépendance au temps réel.
 - **API** : HTTP simple (pas de WebSocket en v1).
-- **Persistance** : SQLite — seed + état courant + **log d'actions complet** → toute partie est rejouable, débuggable, auditable par un tiers.
+- **Persistance** : SQLite — seed + **log d'actions complet** (l'état n'est pas stocké, il se rejoue) → toute partie est rejouable, débuggable, auditable par un tiers.
 - **Observation** : JSON uniquement en v1.
 
 ---
@@ -222,11 +229,11 @@ SQLite, deux tables : `games(id, seed, mode)` et `actions(game_id, n, payload)`.
 
 ## 5. Protocole d'évaluation
 
-- **3 seeds × 3 runs = 9 parties par agent**, moyenne.
-- Interface agent : `act(observation) -> action`.
-- Agents v1 : random, greedy scripté, LLM locaux (Ollama), puis modèles API si concluant (budget ~100 €).
+- **3 seeds × 3 runs = 9 parties par agent**, moyenne. Implémenté par `runner/`.
+- Interface agent : `act(observation) -> action` (`runner/src/agents.rs`). L'observation est **exactement** le JSON du §4 (le runner appelle le même code que le serveur) ; le seul canal d'action est celui du §4, avec les mêmes limites et les mêmes erreurs.
+- Agents v1 : random, greedy scripté, LLM locaux (tout serveur OpenAI-compatible : llama.cpp, Ollama, vLLM), puis modèles API si concluant (budget ~100 €).
 - Comparaison **mode minimal vs mode detailed** sur les mêmes seeds = résultat de benchmark en soi.
-- Seeds d'éval distinctes des seeds de dev.
+- Seeds d'éval distinctes des seeds de dev : **101, 102, 103** en éval, 1/2/3/42/1337 en dev.
 
 ## 6. Métriques
 
@@ -251,7 +258,7 @@ Budget : ~7 h/semaine. Deadline : **premier run comparatif publiable avant octob
 Structs, génération de vagues seedée, pathfinding + no-block + tie-breaking, boucle prépa/résolution, simulation déterministe, vies, score. TUI pour jouer soi-même.
 **Jalon : perdre une partie au TUI et la trouver intéressante.** L'équilibrage se fait ici, en jouant — pas en théorisant. Ne pas avancer tant que le jeu est trivial.
 
-État : `cargo run -p tui -- 42` joue une partie complète jusqu'à la mort. Premier passage d'équilibrage fait au harnais scripté (`--example balance`) : agent greedy mort vague ~24 en moyenne (5 seeds), première fuite vague ~5 (arrivée des blindés), aucune tourelle dominante (meilleure stratégie mono-tourelle : vague 10). **Reste à valider à la main** : jouer quelques parties au TUI et confirmer que c'est intéressant, pas seulement non trivial.
+État : `cargo run -p tui -- 42` joue une partie complète jusqu'à la mort. Premier passage d'équilibrage fait au harnais scripté (`cargo run -p runner --release -- balance`, l'agent greedy de v0.3) : agent greedy mort vague ~24 en moyenne (5 seeds), première fuite vague ~5 (arrivée des blindés), aucune tourelle dominante (meilleure stratégie mono-tourelle : vague 10). Validé à la main au TUI : le jeu est exigeant et plaisant à jouer.
 
 ### v0.2 — API + persistance (semaines 5–6) — **fait**
 Serveur axum, 3 endpoints, validation + erreurs catégorisées, SQLite (seed + log d'actions).
@@ -259,9 +266,11 @@ Serveur axum, 3 endpoints, validation + erreurs catégorisées, SQLite (seed + l
 
 État : `cargo run -p server` sert les trois endpoints ; le schéma ci-dessus (§4) est le contrat figé, testé bout en bout (`cargo test -p server`). La persistance ne stocke que le seed et le log d'actions : l'état est rejoué à chaque requête, donc une partie survit au redémarrage du serveur et reste auditable action par action. Écarts de contrat par rapport au cadrage initial : §10.
 
-### v0.3 — Runner + baselines (semaines 7–8)
-Interface agent, adaptateur Ollama, agents random + greedy, campagne 3×3, sortie CSV/markdown.
+### v0.3 — Runner + baselines (semaines 7–8) — **fait**
+Interface agent, adaptateur LLM local, agents random + greedy, campagne 3×3, sortie CSV/markdown.
 **Jalon : premier tableau baselines vs 2 LLM locaux.**
+
+État : `cargo run -p runner --release` joue la campagne 3 seeds × 3 runs et écrit `results/campaign.csv` + `results/campaign.md` (§11). L'adaptateur LLM parle à n'importe quel serveur OpenAI-compatible (`--agent llm:nom@host:port`, suffixe `+nothink` pour couper le raisonnement), donc ajouter un modèle = un flag ; les campagnes se fusionnent d'une passe à l'autre, ce qui permet de comparer des modèles qui ne tiennent pas ensemble en mémoire. **Jalon atteint** : random, greedy et deux LLM locaux (Gemma-4-E2B et Qwen3.6-27B) dans le même tableau.
 
 ### v0.4 — Modes d'observation + campagne (semaines 9–10)
 Mode `detailed` (écriture du lore), run comparatif minimal vs detailed, README de résultats.
@@ -315,7 +324,7 @@ Décisions prises en implémentant, non couvertes ou laissées ouvertes par le c
 | RNG | xorshift64* écrit dans le dépôt | La reproductibilité ne peut pas dépendre d'une version de crate |
 | Résolution au TUI | Rapport immédiat, pas d'animation | v0.1 sert à équilibrer, pas à regarder ; animation = v0.2+ si utile |
 
-Tout ça reste à ré-équilibrer en jouant : `engine/examples/balance.rs` mesure, le TUI tranche.
+Tout ça reste à ré-équilibrer en jouant : `cargo run -p runner --release -- balance` mesure, le TUI tranche.
 
 ---
 
@@ -333,3 +342,41 @@ Le schéma §4 est figé ; voici où il s'écarte de l'esquisse initiale et pour
 | Erreurs de protocole | `UNKNOWN_ACTION` (400) et `UNKNOWN_GAME` (404) en plus des 7 codes de règle | Un JSON malformé n'est pas une erreur de jeu : le runner doit pouvoir séparer les deux profils |
 | Stockage de l'état | Aucun : seed + log rejoués à chaque requête | Une seule source de vérité, aucun cache à invalider, rejeu et audit gratuits ; un cache mémoire viendra si la latence se voit |
 | Journalisation des erreurs | Les actions refusées sont écrites au log comme les autres | Elles consomment un crédit d'action et incrémentent les métriques : les omettre ferait diverger le rejeu |
+---
+
+## 11. Premiers résultats (v0.3) — `results/campaign.md`
+
+Campagne du 25 juillet 2026, seeds d'éval 101/102/103 × 3 runs, plafond 25 vagues, observation en mode `minimal`.
+LLM locaux, sur une carte de 16 Go :
+
+- **gemma** = Gemma-4-E2B-it (Q4_K_XL, entièrement sur GPU), raisonnement actif.
+- **qwen** = Qwen3.6-27B (IQ4_XS, ~15 Go : débordement partiel sur CPU), **raisonnement coupé** — avec raisonnement le modèle tourne à ~5 tokens/s, soit plus de 2 h par partie. C'est un écart de configuration assumé : les deux lignes ne mesurent pas le même régime de calcul.
+
+3 seeds × 3 runs, 9 parties par agent. Métrique principale : vague atteinte.
+
+| agent | vague moy. | min–max | actions | illégales | rounds forcés | déplacements | or remboursé | tokens/vague | JSON illisibles |
+|---|---|---|---|---|---|---|---|---|---|
+| random | **5.7** | 4–8 | 48.0 | 27.0 | 0.2 | 2.7 | 151 | — | 0 |
+| greedy | **24.3** | 24–25 | 39.7 | 0.0 | 0.0 | 0.0 | 0 | — | 0 |
+| gemma | **6.1** | 5–8 | 38.6 | 5.3 | 0.1 | 4.3 | 267 | 17068 | 15 |
+| qwen | **11.6** | 7–20 | 24.7 | 3.4 | 0.0 | 0.0 | 0 | 3391 | 0 |
+
+### Profil d'erreurs (total par code)
+
+| agent | PATH_BLOCKED | INSUFFICIENT_GOLD | CELL_OCCUPIED | NO_MOVES_LEFT | INVALID_CELL | WRONG_PHASE | UNKNOWN_BUILDING |
+|---|---|---|---|---|---|---|---|
+| random | 0 | 215 | 4 | 17 | 7 | 0 | 0 |
+| greedy | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| gemma | 1 | 9 | 1 | 37 | 0 | 0 | 0 |
+| qwen | 0 | 31 | 0 | 0 | 0 | 0 | 0 |
+
+Ce que ça dit, et pourquoi c'est encourageant pour le benchmark :
+
+- **Le benchmark discrimine, et dans le bon ordre.** greedy 24.3 > qwen 11.6 > gemma 6.1 > random 5.7. Le petit modèle joue à peine mieux que le hasard, le gros fait deux fois mieux mais reste à moitié du plancher scripté : il reste toute la place pour classer des modèles plus forts, sans effet plafond.
+- **La variance est le signal, pas le bruit.** qwen va de la vague 7 à la vague 20 selon le run : le jeu récompense une bonne suite de décisions, il ne se gagne pas au tirage.
+- **Le profil d'erreurs sépare les capacités.** Le random se cogne à l'économie (215 `INSUFFICIENT_GOLD`) ; gemma comprend les prix mais pas le rationnement (37 `NO_MOVES_LEFT` : il redemande des déplacements déjà consommés) ; qwen ne fait plus que des erreurs de budget (31), jamais de protocole. Aucun des trois ne déclenche `PATH_BLOCKED` : personne ne construit encore assez pour buter sur le raisonnement spatial, qui reste donc une capacité **non mesurée** à ce niveau de jeu.
+- **Le gaspillage se mesure.** 267 or remboursés par partie chez gemma (il achète puis revend), 0 chez qwen et le greedy.
+- **Coût.** 17 k tokens par vague survécue pour gemma (raisonnement compris), 3,4 k pour qwen sans raisonnement ; ~7 min par partie contre ~2 min. Une campagne 3×3 se compte en heures pour le premier, en dizaines de minutes pour le second.
+- **JSON illisibles : 15 chez gemma, 0 chez qwen.** La cause mesurée est la troncature du raisonnement : sous 1 400 tokens de réponse, gemma n'atteint jamais son objet JSON (9 échecs sur 7 actions à 700 tokens, 1 sur 14 à 1 400). Ce n'est pas une incapacité à produire du JSON, c'est un budget de sortie trop court — à retenir pour tout modèle à raisonnement.
+
+Les deux modèles ne tiennent pas ensemble sur la carte : la campagne se fait en deux passes, le runner **fusionne** le CSV existant (un agent rejoué remplace ses anciennes lignes, supprimer `results/campaign.csv` remet le tableau à zéro).
