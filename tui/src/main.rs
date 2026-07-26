@@ -197,7 +197,7 @@ fn panel(f: &mut Frame, area: Rect, app: &App) {
         Line::from("VAGUE ENTRANTE".bold()),
         Line::from(composition_line(comp)),
         Line::from(Span::styled(
-            incoming_intel(g.seed, g.wave + 1),
+            incoming_intel(g.seed, g.wave + 1, false),
             Style::new().italic(),
         )),
         Line::from(""),

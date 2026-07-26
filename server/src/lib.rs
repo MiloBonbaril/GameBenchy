@@ -230,9 +230,8 @@ fn state_dto(game_id: &str, g: &Game, mode: Mode) -> StateDto {
         next_wave: NextWave {
             composition: comp(g.composition(g.wave)),
         },
-        // ponytail: le mode `detailed` (lore noyé, needle-in-haystack) est v0.4 ;
-        // le champ est figé au contrat dès maintenant, le texte reste `minimal`.
-        incoming_intel: incoming_intel(g.seed, g.wave + 1),
+        // Seul champ que le mode change (README §2) : mêmes faits, plus de foin.
+        incoming_intel: incoming_intel(g.seed, g.wave + 1, mode == Mode::Detailed),
         moves_remaining: g.moves_remaining,
         actions_remaining: ACTION_LIMIT - g.actions_used,
         shop: BUILDING_TYPES
@@ -494,6 +493,12 @@ mod tests {
         .await;
         let id = r["state"]["game_id"].as_str().unwrap().to_string();
         assert_eq!(r["state"]["mode"], "detailed");
+        // Le mode persisté doit vraiment changer le texte servi (v0.4) : sinon la
+        // comparaison minimal/detailed mesurerait deux fois la même observation.
+        let intel = r["state"]["incoming_intel"].as_str().unwrap();
+        assert!(intel.len() > 200, "lore detailed attendu : {intel}");
+        let (_, m) = call(&app, "POST", "/game", json!({"seed": 1})).await;
+        assert_ne!(m["state"]["incoming_intel"], r["state"]["incoming_intel"]);
         let url = format!("/action?game_id={id}");
         let (st, r) = call(
             &app,

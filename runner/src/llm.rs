@@ -74,8 +74,20 @@ impl Llm {
         }
         let body = body.to_string();
 
-        let raw = post_json(&self.host, "/v1/chat/completions", &body).ok()?;
-        let v: Value = serde_json::from_str(&raw).ok()?;
+        // Un serveur injoignable ou en erreur n'est PAS une mauvaise réponse du
+        // modèle : le compter comme telle produirait un score inventé (c'est ce
+        // qui est arrivé avec un llama-server encore en chargement, qui répond
+        // 200 sur /v1/models et 503 sur /v1/chat/completions). On casse la
+        // campagne au lieu de publier un chiffre faux.
+        let raw = post_json(&self.host, "/v1/chat/completions", &body)
+            .unwrap_or_else(|e| panic!("{} injoignable sur {} : {e}", self.name, self.host));
+        let v: Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("{} : réponse illisible ({e}) : {raw}", self.name));
+        assert!(
+            v["choices"][0]["message"].is_object(),
+            "{} : réponse sans message, serveur en erreur : {raw}",
+            self.name
+        );
         self.tokens += v["usage"]["total_tokens"].as_u64().unwrap_or(0);
         let msg = &v["choices"][0]["message"];
         // Les modèles à raisonnement peuvent tout mettre dans `reasoning_content`.
@@ -206,9 +218,20 @@ fn post_json(host: &str, path: &str, body: &str) -> std::io::Result<String> {
     )?;
     let mut raw = String::new();
     s.read_to_string(&mut raw)?;
-    raw.split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_string())
-        .ok_or_else(|| std::io::Error::other("réponse HTTP malformée"))
+    let (head, body) = raw
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| std::io::Error::other("réponse HTTP malformée"))?;
+    // Le statut est la seule façon de distinguer « le modèle a mal répondu »
+    // de « le serveur n'a pas répondu » (503 pendant le chargement du modèle).
+    match status(head) {
+        "200" => Ok(body.to_string()),
+        code => Err(std::io::Error::other(format!("HTTP {code} : {body}"))),
+    }
+}
+
+/// Code de la ligne de statut : `HTTP/1.1 503 Service Unavailable` → `503`.
+fn status(head: &str) -> &str {
+    head.split_whitespace().nth(1).unwrap_or("?")
 }
 
 #[cfg(test)]
@@ -235,6 +258,17 @@ mod tests {
             r#"{"action":"sell","building_id":"b{1}"}"#
         );
         assert!(first_json_object("aucun json ici").is_none());
+    }
+
+    /// Un statut non-200 doit remonter comme une erreur, pas comme un corps de
+    /// réponse : c'est ce qui sépare un modèle mauvais d'un serveur absent.
+    #[test]
+    fn a_non_200_status_is_an_error() {
+        assert_eq!(status("HTTP/1.1 200 OK"), "200");
+        assert_eq!(status("HTTP/1.1 503 Service Unavailable"), "503");
+        assert_eq!(status(""), "?");
+        // Serveur absent : une erreur de transport, jamais un corps de réponse.
+        assert!(post_json("127.0.0.1:1", "/v1/chat/completions", "{}").is_err());
     }
 
     #[test]

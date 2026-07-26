@@ -4,7 +4,7 @@
 
 GameBenchy est un environnement d'évaluation reproductible pour agents LLM, construit autour d'un jeu de défense par vagues avec maze-building. Le round de préparation est un problème de planification pur (état complet visible, optimisation spatiale + économique), ce qui isole le raisonnement stratégique. La génération procédurale et les mécaniques originales éliminent la contamination par les corpus d'entraînement (contrairement aux benchmarks basés sur NetHack).
 
-> **Statut : v0.3 — runner + baselines.** Moteur déterministe, TUI, serveur HTTP et runner de benchmark implémentés ; premier tableau de résultats en §11. Le reste de ce document fige les décisions de design ; §9, §10 et §11 notent les écarts entre le design et le code.
+> **Statut : v0.4 — premier run comparatif.** Moteur déterministe, TUI, serveur HTTP, runner de benchmark et les deux modes d'observation sont implémentés ; baselines vs 2 LLM locaux en §11, comparaison minimal/detailed en §12. Le reste de ce document fige les décisions de design ; §9, §10, §11 et §12 notent les écarts entre le design et le code.
 
 ## Démarrer
 
@@ -20,6 +20,7 @@ Campagne avec un LLM local (serveur OpenAI-compatible : llama.cpp, Ollama, vLLM)
 
 ```sh
 cargo run -p runner --release -- --agent greedy --agent llm:gemma@127.0.0.1:8080 --max-waves 25
+cargo run -p runner --release -- --agent llm:gemma@127.0.0.1:8080 --mode detailed  # lore noyé
 ```
 
 Au TUI : `hjkl`/flèches déplacent le curseur, `1`–`5` construisent, `s` vend, `m` déplace, `Entrée` lance la vague, `r` rejoue la même seed, `q` quitte.
@@ -272,11 +273,11 @@ Interface agent, adaptateur LLM local, agents random + greedy, campagne 3×3, so
 
 État : `cargo run -p runner --release` joue la campagne 3 seeds × 3 runs et écrit `results/campaign.csv` + `results/campaign.md` (§11). L'adaptateur LLM parle à n'importe quel serveur OpenAI-compatible (`--agent llm:nom@host:port`, suffixe `+nothink` pour couper le raisonnement), donc ajouter un modèle = un flag ; les campagnes se fusionnent d'une passe à l'autre, ce qui permet de comparer des modèles qui ne tiennent pas ensemble en mémoire. **Jalon atteint** : random, greedy et deux LLM locaux (Gemma-4-E2B et Qwen3.6-27B) dans le même tableau.
 
-### v0.4 — Modes d'observation + campagne (semaines 9–10)
+### v0.4 — Modes d'observation + campagne (semaines 9–10) — **fait**
 Mode `detailed` (écriture du lore), run comparatif minimal vs detailed, README de résultats.
 **Jalon final : le premier run comparatif publiable.**
 
-*Marge : si le moteur déborde (l'équilibrage déborde toujours), v0.4 glisse après la deadline sans compromettre le jalon v0.3.*
+État : `--mode detailed` sert le même schéma JSON avec un `incoming_intel` bavard (`engine::incoming_intel`), seedé donc rejouable. **Jalon atteint** : les quatre agents ont joué les mêmes 9 parties dans les deux modes, tableau et lecture en §12. Deux enseignements pour la suite — les agents scriptés donnent un écart exactement nul (le mode ne touche qu'au texte), et le needle-in-haystack ne discriminera qu'au-dessus du niveau de jeu actuel. Écart de calendrier : livré avant la deadline d'octobre 2026, la marge prévue n'a pas servi.
 
 ### v2 (hors scope v1)
 Interface web humaine (comparaison humain/LLM), mode stream (agent verbalisant + injection d'événements par les viewers), catégorie séparée "LLM + harness/outils", char ralentisseur, ennemis 4–5, format d'observation ASCII/texte, masquage de `current_path`.
@@ -338,7 +339,7 @@ Le schéma §4 est figé ; voici où il s'écarte de l'esquisse initiale et pour
 | `hp` des bâtiments | Remplacé par `damage_dealt` | Les bâtiments ne sont pas attaquables en v1 : le champ aurait été une constante ; le cumul de dégâts, lui, sert à l'agent |
 | `kills` / `leaked` | Les deux sont des objets `{infantry, armor, flyer}` | L'esquisse mélangeait objet et liste ; un seul type de composition partout |
 | `actions_remaining` | Ajouté à l'état | La limite dure est une règle du jeu : la cacher pénaliserait l'agent sur du protocole, pas sur de la stratégie |
-| `mode` | Accepté, persisté, renvoyé — texte `minimal` dans les deux cas | Le contrat est figé maintenant ; l'écriture du lore `detailed` est le travail de v0.4 |
+| `mode` | Accepté, persisté, renvoyé ; le lore `detailed` est écrit depuis v0.4 | Le contrat a été figé avant le texte, pour que l'écriture du lore ne puisse pas déplacer le schéma |
 | Erreurs de protocole | `UNKNOWN_ACTION` (400) et `UNKNOWN_GAME` (404) en plus des 7 codes de règle | Un JSON malformé n'est pas une erreur de jeu : le runner doit pouvoir séparer les deux profils |
 | Stockage de l'état | Aucun : seed + log rejoués à chaque requête | Une seule source de vérité, aucun cache à invalider, rejeu et audit gratuits ; un cache mémoire viendra si la latence se voit |
 | Journalisation des erreurs | Les actions refusées sont écrites au log comme les autres | Elles consomment un crédit d'action et incrémentent les métriques : les omettre ferait diverger le rejeu |
@@ -380,3 +381,28 @@ Ce que ça dit, et pourquoi c'est encourageant pour le benchmark :
 - **JSON illisibles : 15 chez gemma, 0 chez qwen.** La cause mesurée est la troncature du raisonnement : sous 1 400 tokens de réponse, gemma n'atteint jamais son objet JSON (9 échecs sur 7 actions à 700 tokens, 1 sur 14 à 1 400). Ce n'est pas une incapacité à produire du JSON, c'est un budget de sortie trop court — à retenir pour tout modèle à raisonnement.
 
 Les deux modèles ne tiennent pas ensemble sur la carte : la campagne se fait en deux passes, le runner **fusionne** le CSV existant (un agent rejoué remplace ses anciennes lignes, supprimer `results/campaign.csv` remet le tableau à zéro).
+
+---
+
+## 12. Robustesse au bruit (v0.4) — `results/campaign.md`
+
+Le mode `detailed` noie les mêmes faits dans un rapport de renseignement bavard : sept à huit phrases de vie de bataillon (pluie, courrier, groupes électrogènes) parmi lesquelles se cache la seule information tactique — l'annonce de la vague N+2. Le remplissage est **vrai et tactiquement vide** : une phrase qui mentirait sur les ennemis testerait la crédulité, pas la lecture. Tout le reste de l'observation est identique au bit près, et le texte reste une fonction pure de `(seed, vague)` : le rejeu d'une partie reproduit le même rapport.
+
+Mêmes seeds, mêmes runs, même plafond de 25 vagues que le §11.
+
+| agent | minimal | detailed | écart | tokens/vague |
+|---|---|---|---|---|
+| random | 5.7 | 5.7 | **+0.0** | — |
+| greedy | 24.3 | 24.3 | **+0.0** | — |
+| gemma | 6.1 | 5.4 | **−0.7** | 17 068 → 18 927 (+11 %) |
+| qwen | 11.6 | 13.9 | **+2.3** | 3 391 → 3 625 (+7 %) |
+
+Lecture :
+
+- **Le contrôle est propre.** Les agents scriptés ne lisent pas `incoming_intel` : leur écart est exactement nul, ce qui prouve que le mode ne touche qu'au texte et jamais aux règles.
+- **Aucun effet mesurable sur les LLM à ce niveau.** −0,7 d'un côté, +2,3 de l'autre, sur 9 parties dont l'étendue va de 7 à 21 vagues : les deux écarts tiennent dans la variance run à run. Le foin ne les fait pas tomber — mais ils meurent d'économie et de rationnement d'actions **bien avant** que l'annonce N+2 soit ce qui limite leur score. Le test needle-in-haystack est donc en place et instrumenté, mais **il ne discrimine pas encore** : il ne mordra que sur des modèles assez forts pour que la préparation de la vague N+2 décide de la partie.
+- **Le bruit se paie en tokens, pas en vagues** : +7 à +11 % par vague survécue. C'est le seul effet robuste des deux lignes.
+
+### Un piège de validité, corrigé
+
+La première campagne `detailed` de qwen a rendu 3,7 vagues de moyenne avec 66 réponses illisibles et zéro token compté : le serveur, encore en chargement, répondait 200 sur `/v1/models` et **503** sur `/v1/chat/completions`, et le runner comptait chaque 503 comme une mauvaise réponse du modèle. Un modèle injoignable obtenait ainsi un score, plus bas que le hasard. Le runner distingue désormais le statut HTTP du contenu : une erreur de transport **casse la campagne** au lieu de publier un chiffre inventé (`runner/src/llm.rs`). Les chiffres ci-dessus sont ceux du rejeu contre un serveur réellement chargé.

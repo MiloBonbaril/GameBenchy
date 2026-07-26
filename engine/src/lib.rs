@@ -650,21 +650,70 @@ pub fn wave_composition(seed: u64, wave: u32) -> Composition {
     [infantry as u32, armor as u32, flyer as u32]
 }
 
+/// Bruit de fond dieselpunk du mode `detailed` : chaque phrase est *vraie* et
+/// tactiquement vide. Un remplissage qui mentirait sur les ennemis ne testerait
+/// plus la lecture mais la crédulité — le foin change, l'aiguille reste.
+const FILLER: [&str; 12] = [
+    "La pluie a repris sur le secteur, les pistes tournent à la boue.",
+    "Le mess signale une rupture de tabac ; le moral tient malgré tout.",
+    "Les groupes électrogènes du poste avancé toussent depuis l'aube.",
+    "Un train de ravitaillement a déraillé deux gares en arrière, sans victime.",
+    "Le vent tourne à l'ouest, la fumée des cheminées rabat sur la vallée.",
+    "Les transmissions parasitent sur la fréquence de nuit depuis l'orage.",
+    "On a repeint les bornes de la route en blanc pour les convois de nuit.",
+    "Le vétérinaire de compagnie réclame du fourrage pour les chevaux de trait.",
+    "Deux hommes sont portés à l'infirmerie pour des pieds de tranchée.",
+    "L'horloge du clocher, arrêtée depuis l'automne, a été remontée hier.",
+    "La citerne d'eau potable est de nouveau opérationnelle depuis midi.",
+    "Le courrier de la semaine est arrivé, quatre sacs pour tout le bataillon.",
+];
+
 /// `incoming_intel` : annonce textuelle de la vague `wave` (README §2).
-/// Mode `minimal` — le mode `detailed` (lore noyé) arrive en v0.4.
-pub fn incoming_intel(seed: u64, wave: u32) -> String {
+///
+/// `detailed` = mêmes faits, noyés dans du remplissage seedé (needle in a
+/// haystack, README §6). Le texte reste une fonction pure de `(seed, wave)` :
+/// deux rejeux de la même partie produisent le même rapport, au caractère près.
+pub fn incoming_intel(seed: u64, wave: u32, detailed: bool) -> String {
     let c = wave_composition(seed, wave);
-    let mut bits = Vec::new();
+    let pick = |short: &'static str, long: &'static str| if detailed { long } else { short };
+    let mut signal = Vec::new();
     if c[1] > 0 {
-        bits.push("des moteurs lourds grondent au loin");
+        signal.push(pick(
+            "des moteurs lourds grondent au loin",
+            "Un guetteur jure avoir senti le sol vibrer sous des chenilles blindées, \
+             deux crêtes plus au nord.",
+        ));
     }
     if c[2] > 0 {
-        bits.push("le ciel bourdonne");
+        signal.push(pick(
+            "le ciel bourdonne",
+            "Quand le vent tombe, on entend un bourdonnement d'hélices monter derrière \
+             les nuages bas.",
+        ));
     }
-    if bits.is_empty() {
-        bits.push("des colonnes d'infanterie se rassemblent");
+    if signal.is_empty() {
+        signal.push(pick(
+            "des colonnes d'infanterie se rassemblent",
+            "Les éclaireurs comptent des colonnes d'infanterie qui se rassemblent \
+             derrière les lignes ennemies.",
+        ));
     }
-    format!("N+2 : {}.", bits.join(", "))
+    if !detailed {
+        return format!("N+2 : {}.", signal.join(", "));
+    }
+
+    let mut rng = Rng::new(seed ^ ((wave as u64) << 32) ^ 0xF01A);
+    // Six phrases de bruit prises en rotation depuis un décalage seedé : pas de
+    // doublon, et le foin varie d'une partie à l'autre.
+    let start = rng.below(FILLER.len() as u64) as usize;
+    let mut lines: Vec<&str> = (0..6).map(|i| FILLER[(start + i) % FILLER.len()]).collect();
+    for s in signal {
+        lines.insert(rng.below(lines.len() as u64 + 1) as usize, s);
+    }
+    format!(
+        "Dépêche du poste d'écoute, estimation à deux vagues d'ici (N+2). {}",
+        lines.join(" ")
+    )
 }
 
 #[cfg(test)]
@@ -836,5 +885,31 @@ mod tests {
         assert!(wave_composition(1, 5)[1] > 0, "blindés dès la vague 5");
         assert!(wave_composition(1, 9)[2] > 0, "volants dès la vague 8");
         assert!(wave_composition(1, 20)[0] > wave_composition(1, 2)[0]);
+    }
+
+    /// Le mode `detailed` doit être plus bruyant que `minimal` sans jamais
+    /// perdre l'information tactique : sinon ce n'est plus le même benchmark.
+    #[test]
+    fn detailed_intel_buries_the_same_facts() {
+        for wave in 1..40u32 {
+            let (mini, det) = (
+                incoming_intel(7, wave, false),
+                incoming_intel(7, wave, true),
+            );
+            let c = wave_composition(7, wave);
+            assert_eq!(det, incoming_intel(7, wave, true), "doit être déterministe");
+            assert!(det.len() > mini.len() * 3, "vague {wave} : pas assez noyé");
+            assert_eq!(
+                det.contains("chenilles blindées"),
+                c[1] > 0,
+                "vague {wave} : l'annonce blindés doit suivre la composition"
+            );
+            assert_eq!(det.contains("hélices"), c[2] > 0, "vague {wave} : volants");
+            // Le bruit reste muet sur les ennemis : aucune phrase de FILLER ne
+            // doit pouvoir être lue comme un renseignement.
+            for f in FILLER {
+                assert!(!f.contains("blind") && !f.contains("avion") && !f.contains("infanterie"));
+            }
+        }
     }
 }

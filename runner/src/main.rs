@@ -4,6 +4,7 @@
 //! ```sh
 //! cargo run -p runner                                  # random + greedy, 3 seeds x 3 runs
 //! cargo run -p runner -- --agent llm:gemma@127.0.0.1:8080 --max-waves 12
+//! cargo run -p runner -- --agent llm:gemma@127.0.0.1:8080 --mode detailed
 //! cargo run -p runner -- balance                       # table mono-tourelle (équilibrage)
 //! ```
 
@@ -45,13 +46,20 @@ impl RunResult {
 }
 
 /// Une partie complète. L'agent ne peut agir que par `Action` : même canal,
-/// mêmes limites et mêmes métriques que par l'API.
-fn play(agent: &mut dyn Agent, seed: u64, run: u32, max_waves: u32) -> RunResult {
+/// mêmes limites et mêmes métriques que par l'API. `mode` ne change que le
+/// texte de `incoming_intel` — c'est tout l'objet de la comparaison v0.4.
+fn play(
+    agent: &mut dyn Agent,
+    seed: u64,
+    run: u32,
+    max_waves: u32,
+    mode: server::Mode,
+) -> RunResult {
     let mut g = Game::new(seed);
     let (mut actions, mut last) = (0u32, None);
     let (t0, p0) = (agent.tokens(), agent.parse_failures());
     while g.phase == Phase::Preparation && g.wave <= max_waves {
-        let obs = server::observation("g0", &g, server::Mode::Minimal);
+        let obs = server::observation("g0", &g, mode);
         let action = agent.act(&g, &obs, last);
         // La limite d'actions du moteur garantit la terminaison même si l'agent
         // ne clôt jamais son round : à 20 tentatives la vague part d'office.
@@ -62,7 +70,12 @@ fn play(agent: &mut dyn Agent, seed: u64, run: u32, max_waves: u32) -> RunResult
         }
     }
     RunResult {
-        agent: agent.name().to_string(),
+        // Le mode fait partie de l'identité de la ligne : c'est la clé de fusion
+        // des campagnes, et les deux modes doivent cohabiter dans le tableau.
+        agent: match mode {
+            server::Mode::Detailed => format!("{}+detailed", agent.name()),
+            server::Mode::Minimal => agent.name().to_string(),
+        },
         seed,
         run,
         wave: g.score(),
@@ -199,6 +212,42 @@ fn markdown<'a>(rows: &'a [RunResult], seeds: &[u64], runs: u32) -> String {
         );
     }
 
+    // Écart minimal vs detailed (README §6) : la même aiguille, plus de foin.
+    let wave_of = |a: &str| mean(rows.iter().filter(|r| r.agent == a).map(|r| r.wave as f64));
+    let pairs: Vec<&&str> = agents
+        .iter()
+        .filter(|a| a.ends_with("+detailed") && agents.contains(&&a[..a.len() - 9]))
+        .collect();
+    if !pairs.is_empty() {
+        s.push_str(
+            "\n## Robustesse au bruit : minimal vs detailed\n\n\
+             | agent | minimal | detailed | écart | tokens/vague min → det |\n\
+             |---|---|---|---|---|\n",
+        );
+        for a in pairs {
+            let base = &a[..a.len() - 9];
+            let tok = |x: &str| {
+                let (t, w): (u64, u32) = rows
+                    .iter()
+                    .filter(|r| r.agent == x)
+                    .fold((0, 0), |(t, w), r| (t + r.tokens, w + r.wave));
+                if t == 0 {
+                    "—".into()
+                } else {
+                    format!("{}", t / w.max(1) as u64)
+                }
+            };
+            let (m, d) = (wave_of(base), wave_of(a));
+            let _ = writeln!(
+                s,
+                "| {base} | {m:.1} | {d:.1} | **{:+.1}** | {} → {} |",
+                d - m,
+                tok(base),
+                tok(a)
+            );
+        }
+    }
+
     s.push_str("\n## Profil d'erreurs (total par code)\n\n| agent |");
     for c in ERROR_CODES {
         let _ = write!(s, " {} |", c.as_str());
@@ -223,7 +272,7 @@ fn balance(seeds: &[u64]) {
     println!("greedy (mixte) :");
     let mut total = 0;
     for s in seeds {
-        let w = play(&mut Greedy::new(None), *s, 0, 100).wave;
+        let w = play(&mut Greedy::new(None), *s, 0, 100, server::Mode::Minimal).wave;
         println!("  seed {s} → vague {w}");
         total += w;
     }
@@ -235,7 +284,16 @@ fn balance(seeds: &[u64]) {
         }
         let sum: u32 = seeds
             .iter()
-            .map(|s| play(&mut Greedy::new(Some(kind)), *s, 0, 100).wave)
+            .map(|s| {
+                play(
+                    &mut Greedy::new(Some(kind)),
+                    *s,
+                    0,
+                    100,
+                    server::Mode::Minimal,
+                )
+                .wave
+            })
             .sum();
         println!(
             "  {:>12} : {:.1}",
@@ -280,13 +338,17 @@ fn main() -> std::io::Result<()> {
         specs = vec!["random".into(), "greedy".into()];
     }
     let out = flag("--out").unwrap_or_else(|| "results".into());
+    let mode = match flag("--mode").as_deref() {
+        Some("detailed") => server::Mode::Detailed,
+        _ => server::Mode::Minimal,
+    };
 
     let mut rows = Vec::new();
     for spec in &specs {
         for &seed in &seeds {
             for run in 0..runs {
                 let mut agent = make_agent(spec, seed, run);
-                let r = play(&mut *agent, seed, run, max_waves);
+                let r = play(&mut *agent, seed, run, max_waves, mode);
                 println!(
                     "{:>28} seed {seed} run {run} → vague {:>3} ({} actions, {} illégales)",
                     r.agent,
@@ -322,8 +384,9 @@ mod tests {
     /// survivre nettement plus longtemps. C'est le sens même d'une baseline.
     #[test]
     fn baselines_are_ordered_and_metrics_are_collected() {
-        let r = play(&mut Random::new(7), 101, 0, 100);
-        let g = play(&mut Greedy::new(None), 101, 0, 100);
+        let m = server::Mode::Minimal;
+        let r = play(&mut Random::new(7), 101, 0, 100, m);
+        let g = play(&mut Greedy::new(None), 101, 0, 100, m);
         assert!(r.illegal() > 0, "le random doit taper dans les erreurs");
         assert!(
             g.wave > r.wave * 2,
@@ -357,10 +420,25 @@ mod tests {
         let one = || {
             let rows: Vec<RunResult> = [101u64, 102]
                 .iter()
-                .map(|s| play(&mut Random::new(*s), *s, 0, 20))
+                .map(|s| play(&mut Random::new(*s), *s, 0, 20, server::Mode::Minimal))
                 .collect();
             csv(&rows)
         };
         assert_eq!(one(), one());
+    }
+
+    /// Le mode `detailed` change le texte vu par l'agent, pas le jeu : un agent
+    /// qui ne lit pas l'intel doit faire exactement le même score, et les deux
+    /// lignes doivent cohabiter dans le tableau (clé de fusion = agent+mode).
+    #[test]
+    fn detailed_mode_is_a_separate_row_and_changes_only_the_text() {
+        let mini = play(&mut Greedy::new(None), 101, 0, 30, server::Mode::Minimal);
+        let det = play(&mut Greedy::new(None), 101, 0, 30, server::Mode::Detailed);
+        assert_eq!(mini.wave, det.wave, "greedy ne lit pas l'intel");
+        assert_eq!(det.agent, "greedy+detailed");
+
+        let md = markdown(&[mini, det], &[101], 1);
+        assert!(md.contains("minimal vs detailed"), "{md}");
+        assert!(md.contains("**+0.0**"), "{md}");
     }
 }
